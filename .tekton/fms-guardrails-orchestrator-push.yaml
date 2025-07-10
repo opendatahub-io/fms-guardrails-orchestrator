@@ -23,7 +23,7 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/ta-guardrails-orchestrator:v0.11.0rc0
+    value: quay.io/opendatahub/ta-guardrails-orchestrator:latest
   - name: dockerfile
     value: Dockerfile
   - name: path-context
