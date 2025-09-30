@@ -40,7 +40,7 @@ use crate::{
         Context, Error, Orchestrator,
         common::{self, validate_detectors},
         types::{
-            Chunk, DetectionBatchStream, Detections, GenerationStream, MaxProcessedIndexBatcher,
+            Chunk, Detection, DetectionBatchStream, GenerationStream, MaxProcessedIndexBatcher,
         },
     },
 };
@@ -124,7 +124,7 @@ impl Handle<StreamingClassificationWithGenTask> for Orchestrator {
             // Create generation stream
             let client = ctx
                 .clients
-                .get_as::<GenerationClient>("generation")
+                .get::<GenerationClient>("generation")
                 .unwrap();
             let generation_stream = match common::generate_stream(
                 client,
@@ -189,10 +189,7 @@ async fn handle_input_detection(
     };
     if !detections.is_empty() {
         // Get token count
-        let client = ctx
-            .clients
-            .get_as::<GenerationClient>("generation")
-            .unwrap();
+        let client = ctx.clients.get::<GenerationClient>("generation").unwrap();
         let input_token_count = match common::tokenize(
             client,
             task.headers.clone(),
@@ -211,7 +208,7 @@ async fn handle_input_detection(
         let response = ClassifiedGeneratedTextStreamResult {
             input_token_count,
             token_classification_results: TextGenTokenClassificationResults {
-                input: Some(detections.into()),
+                input: Some(detections.into_iter().map(Into::into).collect()),
                 output: None,
             },
             warnings: Some(vec![DetectionWarning::unsuitable_input()]),
@@ -362,7 +359,7 @@ async fn process_detection_batch_stream(
 fn output_detection_response(
     generations: &Arc<RwLock<Vec<ClassifiedGeneratedTextStreamResult>>>,
     chunk: Chunk,
-    detections: Detections,
+    detections: Vec<Detection>,
 ) -> Result<ClassifiedGeneratedTextStreamResult, Error> {
     // Get subset of generations relevant for this chunk
     let generations_slice = generations
@@ -383,7 +380,8 @@ fn output_detection_response(
         tokens: Some(tokens),
         ..last
     };
-    response.token_classification_results.output = Some(detections.into());
+    response.token_classification_results.output =
+        Some(detections.into_iter().map(Into::into).collect());
     if chunk.input_start_index == 0 {
         // Get input_token_count and seed from first generation message
         let first = generations_slice.first().unwrap();

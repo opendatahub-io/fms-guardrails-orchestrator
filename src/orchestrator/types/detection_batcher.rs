@@ -14,20 +14,20 @@
  limitations under the License.
 
 */
-pub mod chat_completion;
-pub use chat_completion::*;
+pub mod completion;
+pub use completion::*;
 pub mod max_processed_index;
 pub use max_processed_index::*;
 
-use super::{Chunk, Detections};
+use super::{Chunk, Detection};
 
-pub type Batch = (u32, Chunk, Detections);
+pub type Batch = (u32, Chunk, Vec<Detection>);
 
 /// A detection batcher.
 /// Implements pluggable batching logic for a [`DetectionBatchStream`].
 pub trait DetectionBatcher: std::fmt::Debug + Clone + Send + 'static {
     /// Pushes new detections.
-    fn push(&mut self, input_id: u32, chunk: Chunk, detections: Detections);
+    fn push(&mut self, input_id: u32, chunk: Chunk, detections: Vec<Detection>);
 
     /// Removes the next batch of detections, if ready.
     fn pop_batch(&mut self) -> Option<Batch>;

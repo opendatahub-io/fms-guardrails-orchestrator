@@ -26,12 +26,8 @@ use tracing::{Instrument, debug, instrument};
 use super::{client::*, utils::*};
 use crate::{
     clients::{
-        TextContentsDetectorClient,
         chunker::{ChunkerClient, DEFAULT_CHUNKER_ID},
-        detector::{
-            ContextType, TextChatDetectorClient, TextContextDocDetectorClient,
-            TextGenerationDetectorClient,
-        },
+        detector::{ContextType, DetectorClient},
         openai,
     },
     models::DetectorParams,
@@ -69,7 +65,7 @@ pub async fn chunks(
                                 }
                                 let client = ctx
                                     .clients
-                                    .get_as::<ChunkerClient>(&chunker_id)
+                                    .get::<ChunkerClient>(&chunker_id)
                                     .ok_or_else(|| Error::ChunkerNotFound(chunker_id.clone()))?;
                                 let chunks = chunk(client, chunker_id.clone(), text)
                                     .await?
@@ -127,7 +123,7 @@ pub async fn chunk_streams(
         } else {
             let client = ctx
                 .clients
-                .get_as::<ChunkerClient>(&chunker_id)
+                .get::<ChunkerClient>(&chunker_id)
                 .ok_or_else(|| Error::ChunkerNotFound(chunker_id.clone()))?;
             chunk_stream(client, chunker_id.clone(), input_broadcast_rx).await
         }?;
@@ -192,7 +188,7 @@ pub async fn text_contents_detections(
     detectors: HashMap<String, DetectorParams>,
     input_id: u32,
     inputs: Vec<(usize, String)>,
-) -> Result<(u32, Detections), Error> {
+) -> Result<(u32, Vec<Detection>), Error> {
     let chunkers = get_chunker_ids(&ctx, &detectors)?;
     let chunk_map = chunks(ctx.clone(), chunkers, inputs).await?;
     let inputs = detectors
@@ -214,10 +210,7 @@ pub async fn text_contents_detections(
             let default_threshold = ctx.config.detector(&detector_id).unwrap().default_threshold;
             let threshold = params.pop_threshold().unwrap_or(default_threshold);
             async move {
-                let client = ctx
-                    .clients
-                    .get_as::<TextContentsDetectorClient>(&detector_id)
-                    .unwrap();
+                let client = ctx.clients.get::<DetectorClient>(&detector_id).unwrap();
                 let detections = detect_text_contents(
                     client,
                     headers,
@@ -229,7 +222,7 @@ pub async fn text_contents_detections(
                 .await?
                 .into_iter()
                 .filter(|detection| detection.score >= threshold)
-                .collect::<Detections>();
+                .collect::<Vec<_>>();
                 Ok::<_, Error>(detections)
             }
             .in_current_span()
@@ -237,7 +230,7 @@ pub async fn text_contents_detections(
         .buffer_unordered(ctx.config.detector_concurrent_requests)
         .try_collect::<Vec<_>>()
         .await?;
-    let mut detections = results.into_iter().flatten().collect::<Detections>();
+    let mut detections = results.into_iter().flatten().collect::<Vec<_>>();
     detections.sort_by_key(|detection| detection.start);
     Ok((input_id, detections))
 }
@@ -273,10 +266,7 @@ pub async fn text_contents_detection_streams(
                 while let Ok(result) = chunk_rx.recv().await {
                     match result {
                         Ok(chunk) => {
-                            let client = ctx
-                                .clients
-                                .get_as::<TextContentsDetectorClient>(&detector_id)
-                                .unwrap();
+                            let client = ctx.clients.get::<DetectorClient>(&detector_id).unwrap();
                             match detect_text_contents(
                                 client,
                                 headers.clone(),
@@ -292,7 +282,7 @@ pub async fn text_contents_detection_streams(
                                     let detections = detections
                                         .into_iter()
                                         .filter(|detection| detection.score >= threshold)
-                                        .collect::<Detections>();
+                                        .collect::<Vec<_>>();
                                     // Send to detection channel
                                     let _ =
                                         detection_tx.send(Ok((input_id, chunk, detections))).await;
@@ -327,7 +317,7 @@ pub async fn text_generation_detections(
     detectors: HashMap<DetectorId, DetectorParams>,
     prompt: String,
     generated_text: String,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let inputs = detectors
         .iter()
         .map(|(detector_id, params)| {
@@ -347,10 +337,7 @@ pub async fn text_generation_detections(
             let default_threshold = ctx.config.detector(&detector_id).unwrap().default_threshold;
             let threshold = params.pop_threshold().unwrap_or(default_threshold);
             async move {
-                let client = ctx
-                    .clients
-                    .get_as::<TextGenerationDetectorClient>(&detector_id)
-                    .unwrap();
+                let client = ctx.clients.get::<DetectorClient>(&detector_id).unwrap();
                 let detections = detect_text_generation(
                     client,
                     headers,
@@ -362,7 +349,7 @@ pub async fn text_generation_detections(
                 .await?
                 .into_iter()
                 .filter(|detection| detection.score >= threshold)
-                .collect::<Detections>();
+                .collect::<Vec<_>>();
                 Ok::<_, Error>(detections)
             }
             .in_current_span()
@@ -370,7 +357,7 @@ pub async fn text_generation_detections(
         .buffer_unordered(ctx.config.detector_concurrent_requests)
         .try_collect::<Vec<_>>()
         .await?;
-    let detections = results.into_iter().flatten().collect::<Detections>();
+    let detections = results.into_iter().flatten().collect::<Vec<_>>();
     Ok(detections)
 }
 
@@ -383,7 +370,7 @@ pub async fn text_chat_detections(
     detectors: HashMap<DetectorId, DetectorParams>,
     messages: Vec<openai::Message>,
     tools: Vec<openai::Tool>,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let inputs = detectors
         .iter()
         .map(|(detector_id, params)| {
@@ -403,10 +390,7 @@ pub async fn text_chat_detections(
             let default_threshold = ctx.config.detector(&detector_id).unwrap().default_threshold;
             let threshold = params.pop_threshold().unwrap_or(default_threshold);
             async move {
-                let client = ctx
-                    .clients
-                    .get_as::<TextChatDetectorClient>(&detector_id)
-                    .unwrap();
+                let client = ctx.clients.get::<DetectorClient>(&detector_id).unwrap();
                 let detections = detect_text_chat(
                     client,
                     headers,
@@ -418,7 +402,7 @@ pub async fn text_chat_detections(
                 .await?
                 .into_iter()
                 .filter(|detection| detection.score >= threshold)
-                .collect::<Detections>();
+                .collect::<Vec<_>>();
                 Ok::<_, Error>(detections)
             }
             .in_current_span()
@@ -426,7 +410,7 @@ pub async fn text_chat_detections(
         .buffer_unordered(ctx.config.detector_concurrent_requests)
         .try_collect::<Vec<_>>()
         .await?;
-    let detections = results.into_iter().flatten().collect::<Detections>();
+    let detections = results.into_iter().flatten().collect::<Vec<_>>();
     Ok(detections)
 }
 
@@ -440,7 +424,7 @@ pub async fn text_context_detections(
     content: String,
     context_type: ContextType,
     context: Vec<String>,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let inputs = detectors
         .iter()
         .map(|(detector_id, params)| {
@@ -463,10 +447,7 @@ pub async fn text_context_detections(
                     ctx.config.detector(&detector_id).unwrap().default_threshold;
                 let threshold = params.pop_threshold().unwrap_or(default_threshold);
                 async move {
-                    let client = ctx
-                        .clients
-                        .get_as::<TextContextDocDetectorClient>(&detector_id)
-                        .unwrap();
+                    let client = ctx.clients.get::<DetectorClient>(&detector_id).unwrap();
                     let detections = detect_text_context(
                         client,
                         headers,
@@ -479,7 +460,7 @@ pub async fn text_context_detections(
                     .await?
                     .into_iter()
                     .filter(|detection| detection.score >= threshold)
-                    .collect::<Detections>();
+                    .collect::<Vec<_>>();
                     Ok::<_, Error>(detections)
                 }
                 .in_current_span()
@@ -488,7 +469,7 @@ pub async fn text_context_detections(
         .buffer_unordered(ctx.config.detector_concurrent_requests)
         .try_collect::<Vec<_>>()
         .await?;
-    let detections = results.into_iter().flatten().collect::<Detections>();
+    let detections = results.into_iter().flatten().collect::<Vec<_>>();
     Ok(detections)
 }
 
@@ -611,7 +592,7 @@ mod test {
                 input_end_index: 2,
             }]);
         });
-        let sentence_chunker_server = MockServer::new("sentence_chunker").grpc().with_mocks(mocks);
+        let sentence_chunker_server = MockServer::new_grpc("sentence_chunker").with_mocks(mocks);
         sentence_chunker_server.start().await.unwrap();
 
         // Create whole_doc_chunker
@@ -628,9 +609,7 @@ mod test {
                 token_count: 25,
             });
         });
-        let whole_doc_chunker_server = MockServer::new("whole_doc_chunker")
-            .grpc()
-            .with_mocks(mocks);
+        let whole_doc_chunker_server = MockServer::new_grpc("whole_doc_chunker").with_mocks(mocks);
         whole_doc_chunker_server.start().await.unwrap();
 
         // Create error chunker
@@ -639,7 +618,7 @@ mod test {
             when.path(CHUNKER_PATH);
             then.internal_server_error();
         });
-        let error_chunker_server = MockServer::new("error_chunker").grpc().with_mocks(mocks);
+        let error_chunker_server = MockServer::new_grpc("error_chunker").with_mocks(mocks);
         error_chunker_server.start().await.unwrap();
 
         // Create fake detector
@@ -689,7 +668,7 @@ mod test {
             }]]);
         });
 
-        let fake_detector_server = MockServer::new("fake_detector").with_mocks(mocks);
+        let fake_detector_server = MockServer::new_http("fake_detector").with_mocks(mocks);
         fake_detector_server.start().await.unwrap();
 
         let mut config = OrchestratorConfig::default();

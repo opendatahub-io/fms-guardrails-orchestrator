@@ -23,15 +23,14 @@ use tracing::{debug, instrument};
 
 use crate::{
     clients::{
-        GenerationClient, TextContentsDetectorClient,
+        DetectorClient, GenerationClient,
         chunker::ChunkerClient,
         detector::{
             ChatDetectionRequest, ContentAnalysisRequest, ContextDocsDetectionRequest, ContextType,
-            GenerationDetectionRequest, TextChatDetectorClient, TextContextDocDetectorClient,
-            TextGenerationDetectorClient,
+            GenerationDetectionRequest,
         },
         http::JSON_CONTENT_TYPE,
-        openai::{self, OpenAiClient},
+        openai::{self, OpenAiClient, TokenizeRequest},
     },
     models::{
         ClassifiedGeneratedTextResult as GenerateResponse, DetectorParams,
@@ -99,20 +98,20 @@ pub async fn chunk_stream(
 /// Sends request to text contents detector client.
 #[instrument(skip_all, fields(detector_id))]
 pub async fn detect_text_contents(
-    client: &TextContentsDetectorClient,
+    client: &DetectorClient,
     headers: HeaderMap,
     detector_id: DetectorId,
     params: DetectorParams,
     chunks: Chunks,
     apply_chunk_offset: bool,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let detector_id = detector_id.clone();
     let contents = chunks
         .iter()
         .map(|chunk| chunk.text.clone())
         .collect::<Vec<_>>();
     if contents.is_empty() {
-        return Ok(Detections::default());
+        return Ok(Vec::new());
     }
     let request = ContentAnalysisRequest::new(contents, params);
     debug!(%detector_id, ?request, "sending detector request");
@@ -142,20 +141,20 @@ pub async fn detect_text_contents(
                 })
                 .collect::<Vec<_>>()
         })
-        .collect::<Detections>();
+        .collect::<Vec<_>>();
     Ok(detections)
 }
 
 /// Sends request to text generation detector client.
 #[instrument(skip_all, fields(detector_id))]
 pub async fn detect_text_generation(
-    client: &TextGenerationDetectorClient,
+    client: &DetectorClient,
     headers: HeaderMap,
     detector_id: DetectorId,
     params: DetectorParams,
     prompt: String,
     generated_text: String,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let detector_id = detector_id.clone();
     let request = GenerationDetectionRequest::new(prompt, generated_text, params);
     debug!(%detector_id, ?request, "sending detector request");
@@ -174,20 +173,20 @@ pub async fn detect_text_generation(
             detection.detector_id = Some(detector_id.clone());
             detection
         })
-        .collect::<Detections>();
+        .collect::<Vec<_>>();
     Ok(detections)
 }
 
 /// Sends request to text chat detector client.
 #[instrument(skip_all, fields(detector_id))]
 pub async fn detect_text_chat(
-    client: &TextChatDetectorClient,
+    client: &DetectorClient,
     headers: HeaderMap,
     detector_id: DetectorId,
     params: DetectorParams,
     messages: Vec<openai::Message>,
     tools: Vec<openai::Tool>,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let detector_id = detector_id.clone();
     let request = ChatDetectionRequest::new(messages, tools, params);
     debug!(%detector_id, ?request, "sending detector request");
@@ -206,21 +205,21 @@ pub async fn detect_text_chat(
             detection.detector_id = Some(detector_id.clone());
             detection
         })
-        .collect::<Detections>();
+        .collect::<Vec<_>>();
     Ok(detections)
 }
 
 /// Sends request to text context detector client.
 #[instrument(skip_all, fields(detector_id))]
 pub async fn detect_text_context(
-    client: &TextContextDocDetectorClient,
+    client: &DetectorClient,
     headers: HeaderMap,
     detector_id: DetectorId,
     params: DetectorParams,
     content: String,
     context_type: ContextType,
     context: Vec<String>,
-) -> Result<Detections, Error> {
+) -> Result<Vec<Detection>, Error> {
     let detector_id = detector_id.clone();
     let request = ContextDocsDetectionRequest::new(content, context_type, context, params.clone());
     debug!(%detector_id, ?request, "sending detector request");
@@ -239,7 +238,7 @@ pub async fn detect_text_context(
             detection.detector_id = Some(detector_id.clone());
             detection
         })
-        .collect::<Detections>();
+        .collect::<Vec<_>>();
     Ok(detections)
 }
 
@@ -335,6 +334,27 @@ pub async fn completion_stream(
     .enumerate()
     .boxed();
     Ok(stream)
+}
+
+/// Sends tokenize request to OpenAI client.
+#[instrument(skip_all, fields(model_id))]
+pub async fn tokenize_openai(
+    client: &OpenAiClient,
+    mut headers: HeaderMap,
+    request: TokenizeRequest,
+) -> Result<openai::TokenizeResponse, Error> {
+    let model_id = request.model.clone();
+    debug!(%model_id, ?request, "sending tokenize request");
+    headers.append(CONTENT_TYPE, JSON_CONTENT_TYPE);
+    let response = client.tokenize(request, headers).await.map_err(|error| {
+        tracing::error!("Tokenize request failed: {error}");
+        Error::TokenizeRequestFailed {
+            id: model_id.clone(),
+            error,
+        }
+    })?;
+    debug!(%model_id, ?response, "received tokenize response");
+    Ok(response)
 }
 
 /// Sends tokenize request to generation client.

@@ -22,7 +22,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::State,
     http::HeaderMap,
     response::{
         IntoResponse, Response,
@@ -41,11 +41,16 @@ use tracing::info;
 
 use super::{Error, ServerState};
 use crate::{
-    clients::openai::{ChatCompletionsRequest, ChatCompletionsResponse},
-    models::{self, InfoParams, InfoResponse, StreamingContentDetectionRequest},
+    clients::openai::{
+        ChatCompletionsRequest, ChatCompletionsResponse, CompletionsRequest, CompletionsResponse,
+    },
+    models::{self, InfoResponse, StreamingContentDetectionRequest},
     orchestrator::{
         self,
-        handlers::{chat_completions_detection::ChatCompletionsDetectionTask, *},
+        handlers::{
+            chat_completions_detection::ChatCompletionsDetectionTask,
+            completions_detection::CompletionsDetectionTask, *,
+        },
     },
     utils::{self, trace::current_trace_id},
 };
@@ -89,11 +94,17 @@ pub fn guardrails_router(state: Arc<ServerState>) -> Router {
             post(detect_context_documents),
         )
         .route("/api/v2/text/detection/generated", post(detect_generated));
-    if state.orchestrator.config().chat_generation.is_some() {
+    if state.orchestrator.config().openai.is_some() {
         info!("Enabling chat completions detection endpoint");
         router = router.route(
             "/api/v2/chat/completions-detection",
             post(chat_completions_detection),
+        );
+
+        info!("Enabling completions detection endpoint");
+        router = router.route(
+            "/api/v2/text/completions-detection",
+            post(completions_detection),
         );
     }
     router.with_state(state)
@@ -110,9 +121,15 @@ async fn health() -> Result<impl IntoResponse, ()> {
 
 async fn info(
     State(state): State<Arc<ServerState>>,
-    Query(params): Query<InfoParams>,
+    headers: HeaderMap,
 ) -> Result<Json<InfoResponse>, Error> {
-    let services = state.orchestrator.client_health(params.probe).await;
+    // Filter passthrough headers from the request
+    let passthrough_headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
+    let services = state.orchestrator.client_health(passthrough_headers).await;
     Ok(Json(InfoResponse { services }))
 }
 
@@ -123,7 +140,11 @@ async fn classification_with_gen(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = ClassificationWithGenTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -141,7 +162,11 @@ async fn generation_with_detection(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = GenerationWithDetectionTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -161,12 +186,16 @@ async fn stream_classification_with_gen(
         return Sse::new(
             stream::iter([Ok(Event::default()
                 .event("error")
-                .json_data(error.to_json())
+                .json_data(error)
                 .unwrap())])
             .boxed(),
         );
     }
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = StreamingClassificationWithGenTask::new(trace_id, request, headers);
     let response_stream = state.orchestrator.handle(task).await.unwrap();
     // Convert response stream to a stream of SSE events
@@ -178,10 +207,7 @@ async fn stream_classification_with_gen(
                 .unwrap()),
             Err(error) => {
                 let error: Error = error.into();
-                Ok(Event::default()
-                    .event("error")
-                    .json_data(error.to_json())
-                    .unwrap())
+                Ok(Event::default().event("error").json_data(error).unwrap())
             }
         })
         .boxed();
@@ -202,12 +228,17 @@ async fn stream_content_detection(
     match content_type {
         Some(content_type) if content_type.starts_with("application/x-ndjson") => (),
         _ => {
-            return Err(Error::UnsupportedContentType(
-                "expected application/x-ndjson".into(),
-            ));
+            return Err(Error {
+                code: http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                details: "expected application/x-ndjson".into(),
+            });
         }
     };
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
 
     // Create input stream
     let input_stream = json_lines
@@ -242,8 +273,7 @@ async fn stream_content_detection(
                 Err(error) => {
                     // Convert orchestrator::Error to server::Error
                     let error: Error = error.into();
-                    // server::Error doesn't impl Serialize, so we use to_json()
-                    let error_msg = utils::json::to_nd_string(&error.to_json()).unwrap();
+                    let error_msg = utils::json::to_nd_string(&error).unwrap();
                     let _ = output_tx.send(Ok(error_msg)).await;
                 }
             }
@@ -263,7 +293,11 @@ async fn detection_content(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = TextContentDetectionTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -278,7 +312,11 @@ async fn detect_context_documents(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = ContextDocsDetectionTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -293,7 +331,11 @@ async fn detect_chat(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate_for_text()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = ChatDetectionTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -311,7 +353,11 @@ async fn detect_generated(
 ) -> Result<impl IntoResponse, Error> {
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = DetectionOnGenerationTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => Ok(Json(response).into_response()),
@@ -327,7 +373,11 @@ async fn chat_completions_detection(
     use ChatCompletionsResponse::*;
     let trace_id = current_trace_id();
     request.validate()?;
-    let headers = filter_headers(&state.orchestrator.config().passthrough_headers, headers);
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
     let task = ChatCompletionsDetectionTask::new(trace_id, request, headers);
     match state.orchestrator.handle(task).await {
         Ok(response) => match response {
@@ -344,10 +394,48 @@ async fn chat_completions_detection(
                         }
                         Err(error) => {
                             let error: Error = error.into();
-                            Ok(Event::default()
-                                .event("error")
-                                .json_data(error.to_json())
-                                .unwrap())
+                            Ok(Event::default().event("error").json_data(error).unwrap())
+                        }
+                    })
+                    .boxed();
+                let sse = Sse::new(event_stream).keep_alive(KeepAlive::default());
+                Ok(sse.into_response())
+            }
+        },
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn completions_detection(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    WithRejection(Json(request), _): WithRejection<Json<CompletionsRequest>, Error>,
+) -> Result<impl IntoResponse, Error> {
+    use CompletionsResponse::*;
+    let trace_id = current_trace_id();
+    request.validate()?;
+    let headers = filter_headers(
+        &state.orchestrator.config().passthrough_headers,
+        headers,
+        state.orchestrator.config().rewrite_forwarded_access_header,
+    );
+    let task = CompletionsDetectionTask::new(trace_id, request, headers);
+    match state.orchestrator.handle(task).await {
+        Ok(response) => match response {
+            Unary(response) => Ok(Json(response).into_response()),
+            Streaming(response_rx) => {
+                let response_stream = ReceiverStream::new(response_rx);
+                // Convert response stream to a stream of SSE events
+                let event_stream: BoxStream<Result<Event, Infallible>> = response_stream
+                    .map(|message| match message {
+                        Ok(Some(chunk)) => Ok(Event::default().json_data(chunk).unwrap()),
+                        Ok(None) => {
+                            // The stream completed, send [DONE] message
+                            Ok(Event::default().data("[DONE]"))
+                        }
+                        Err(error) => {
+                            let error: Error = error.into();
+                            Ok(Event::default().event("error").json_data(error).unwrap())
                         }
                     })
                     .boxed();
@@ -360,10 +448,32 @@ async fn chat_completions_detection(
 }
 
 /// Filters a [`HeaderMap`] with a set of header names, returning a new [`HeaderMap`].
-pub fn filter_headers(passthrough_headers: &HashSet<String>, headers: HeaderMap) -> HeaderMap {
-    headers
+pub fn filter_headers(
+    passthrough_headers: &HashSet<String>,
+    headers: HeaderMap,
+    rewrite_forwarded_access_header: bool,
+) -> HeaderMap {
+    let filtered_headers = headers
         .iter()
         .filter(|(name, _)| passthrough_headers.contains(&name.as_str().to_lowercase()))
         .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
+        .collect();
+    if rewrite_forwarded_access_header {
+        rewrite_forwarded_access_headers(filtered_headers)
+    } else {
+        filtered_headers
+    }
+}
+
+/// Rewrites headers as needed (e.g., X-Forwarded-Access-Token to Authorization: Bearer ...)
+pub fn rewrite_forwarded_access_headers(mut headers: HeaderMap) -> HeaderMap {
+    use http::{HeaderName, HeaderValue};
+    if let Some(token) = headers.remove("x-forwarded-access-token") {
+        let bearer_token: bytes::Bytes = [b"Bearer ", token.as_bytes()].concat().into();
+        if let Ok(auth_value) = HeaderValue::from_maybe_shared(bearer_token) {
+            headers.insert(HeaderName::from_static("authorization"), auth_value);
+            return headers;
+        }
+    }
+    headers
 }

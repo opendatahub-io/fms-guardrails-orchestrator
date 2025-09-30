@@ -16,11 +16,11 @@
 */
 use std::collections::{BTreeMap, btree_map};
 
-use super::{Batch, Chunk, DetectionBatcher, Detections};
+use super::{Batch, Chunk, Detection, DetectionBatcher};
 
 pub type ChoiceIndex = u32;
 
-/// A batcher for chat completions.
+/// A batcher for completions.
 ///
 /// A batch corresponds to a choice-chunk (where each chunk is associated
 /// with a particular choice through a ChoiceIndex). Batches are returned
@@ -36,14 +36,14 @@ pub type ChoiceIndex = u32;
 ///
 /// This batcher requires that all detectors use the same chunker.
 #[derive(Debug, Clone)]
-pub struct ChatCompletionBatcher {
+pub struct CompletionBatcher {
     n_detectors: usize,
     // We place the chunk first since chunk ordering includes where
     // the chunk is in all the processed messages.
-    state: BTreeMap<(Chunk, ChoiceIndex), Vec<Detections>>,
+    state: BTreeMap<(Chunk, ChoiceIndex), Vec<Vec<Detection>>>,
 }
 
-impl ChatCompletionBatcher {
+impl CompletionBatcher {
     pub fn new(n_detectors: usize) -> Self {
         Self {
             n_detectors,
@@ -52,8 +52,8 @@ impl ChatCompletionBatcher {
     }
 }
 
-impl DetectionBatcher for ChatCompletionBatcher {
-    fn push(&mut self, choice_index: ChoiceIndex, chunk: Chunk, detections: Detections) {
+impl DetectionBatcher for CompletionBatcher {
+    fn push(&mut self, choice_index: ChoiceIndex, chunk: Chunk, detections: Vec<Detection>) {
         match self.state.entry((chunk, choice_index)) {
             btree_map::Entry::Vacant(entry) => {
                 // New chunk, insert entry
@@ -118,7 +118,7 @@ mod test {
 
         // Create a batcher that will process batches for 2 detectors
         let n_detectors = 2;
-        let mut batcher = ChatCompletionBatcher::new(n_detectors);
+        let mut batcher = CompletionBatcher::new(n_detectors);
 
         // Push chunk detections for pii detector
         batcher.push(
@@ -131,8 +131,7 @@ mod test {
                 detection_type: "pii".into(),
                 score: 0.4,
                 ..Default::default()
-            }]
-            .into(),
+            }],
         );
 
         // We only have detections for 1 detector
@@ -160,8 +159,7 @@ mod test {
                     score: 0.8,
                     ..Default::default()
                 },
-            ]
-            .into(),
+            ],
         );
 
         // We have detections for 2 detectors
@@ -203,26 +201,26 @@ mod test {
 
         // Create a batcher that will process batches for 2 detectors
         let n_detectors = 2;
-        let mut batcher = ChatCompletionBatcher::new(n_detectors);
+        let mut batcher = CompletionBatcher::new(n_detectors);
 
         for choice_index in 0..choices {
             // Push chunk-2 detections for pii detector
             batcher.push(
                 choice_index,
                 chunks[1].clone(),
-                Detections::default(), // no detections
+                Vec::new(), // no detections
             );
             // Push chunk-1 detections for hap detector
             batcher.push(
                 choice_index,
                 chunks[0].clone(),
-                Detections::default(), // no detections
+                Vec::new(), // no detections
             );
             // Push chunk-2 detections for hap detector
             batcher.push(
                 choice_index,
                 chunks[1].clone(),
-                Detections::default(), // no detections
+                Vec::new(), // no detections
             );
         }
 
@@ -242,8 +240,7 @@ mod test {
                     detection_type: "pii".into(),
                     score: 0.4,
                     ..Default::default()
-                }]
-                .into(),
+                }],
             );
         }
 
@@ -326,7 +323,7 @@ mod test {
 
         // Create a batcher that will process batches for 2 detectors
         let n_detectors = 2;
-        let mut batcher = ChatCompletionBatcher::new(n_detectors);
+        let mut batcher = CompletionBatcher::new(n_detectors);
 
         // Intersperse choice detections
         // NOTE: There may be an edge case when chunk-2 (or later) detections are pushed
@@ -339,37 +336,37 @@ mod test {
         batcher.push(
             choice_1_index,
             choice_1_chunks[1].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
         // Same for choice 2
         batcher.push(
             choice_2_index,
             choice_2_chunks[1].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
         // Push chunk-2 detections for hap detector, choice 2
         batcher.push(
             choice_2_index,
             choice_2_chunks[1].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
         // Same for choice 1
         batcher.push(
             choice_1_index,
             choice_1_chunks[1].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
         // Push chunk-1 detections for hap detector, choice 1
         batcher.push(
             choice_1_index,
             choice_1_chunks[0].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
         // Same for choice 2
         batcher.push(
             choice_2_index,
             choice_2_chunks[0].clone(),
-            Detections::default(), // no detections
+            Vec::new(), // no detections
         );
 
         // We have all detections for chunk-2, but not chunk-1, for both choices
@@ -387,8 +384,7 @@ mod test {
                 detection_type: "pii".into(),
                 score: 0.4,
                 ..Default::default()
-            }]
-            .into(),
+            }],
         );
         // Push chunk-1 detections for pii detector, for second choice
         batcher.push(
@@ -401,8 +397,7 @@ mod test {
                 detection_type: "pii".into(),
                 score: 0.4,
                 ..Default::default()
-            }]
-            .into(),
+            }],
         );
 
         // We have all detections for chunk-1 and chunk-2
@@ -457,15 +452,15 @@ mod test {
 
         // Create detection channels and streams
         let (pii_detections_tx, pii_detections_rx) =
-            mpsc::channel::<Result<(ChoiceIndex, Chunk, Detections), Error>>(4);
+            mpsc::channel::<Result<(ChoiceIndex, Chunk, Vec<Detection>), Error>>(4);
         let pii_detections_stream = ReceiverStream::new(pii_detections_rx).boxed();
         let (hap_detections_tx, hap_detections_rx) =
-            mpsc::channel::<Result<(ChoiceIndex, Chunk, Detections), Error>>(4);
+            mpsc::channel::<Result<(ChoiceIndex, Chunk, Vec<Detection>), Error>>(4);
         let hap_detections_stream = ReceiverStream::new(hap_detections_rx).boxed();
 
         // Create a batcher that will process batches for 2 detectors
         let n_detectors = 2;
-        let batcher = ChatCompletionBatcher::new(n_detectors);
+        let batcher = CompletionBatcher::new(n_detectors);
 
         // Create detection batch stream
         let streams = vec![pii_detections_stream, hap_detections_stream];
@@ -477,7 +472,7 @@ mod test {
                 .send(Ok((
                     choice_index,
                     chunks[1].clone(),
-                    Detections::default(), // no detections
+                    Vec::new(), // no detections
                 )))
                 .await;
 
@@ -486,7 +481,7 @@ mod test {
                 .send(Ok((
                     choice_index,
                     chunks[0].clone(),
-                    Detections::default(), // no detections
+                    Vec::new(), // no detections
                 )))
                 .await;
 
@@ -495,7 +490,7 @@ mod test {
                 .send(Ok((
                     choice_index,
                     chunks[1].clone(),
-                    Detections::default(), // no detections
+                    Vec::new(), // no detections
                 )))
                 .await;
         }
@@ -520,8 +515,7 @@ mod test {
                         detection_type: "pii".into(),
                         score: 0.4,
                         ..Default::default()
-                    }]
-                    .into(),
+                    }],
                 )))
                 .await;
         }
