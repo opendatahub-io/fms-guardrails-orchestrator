@@ -657,9 +657,9 @@ spec:
       - name: build
         computeResources:
           requests:
-            memory: 20Gi
+            memory: 30Gi
           limits:
-            memory: 20Gi
+            memory: 30Gi
   taskRunTemplate:
     serviceAccountName: build-pipeline-fms-guardrails-orchestrator
   workspaces:
