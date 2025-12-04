@@ -25,7 +25,7 @@ spec:
   - name: output-image
     value: quay.io/opendatahub/ta-guardrails-orchestrator:odh-stable
   - name: dockerfile
-    value: Dockerfile
+    value: Dockerfile.amd64
   - name: path-context
     value: .
   pipelineSpec:
