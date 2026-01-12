@@ -35,7 +35,7 @@ spec:
   - name: pipeline-type
     value: pull-request
   taskRunSpecs:
-  - pipelineTaskName: build-container
+  - pipelineTaskName: build-images
     computeResources:
       requests:
         cpu: '8'

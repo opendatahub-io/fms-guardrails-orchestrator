@@ -33,7 +33,7 @@ spec:
     - '{{target_branch}}-{{revision}}'
     - 'odh-stable'
   taskRunSpecs:
-  - pipelineTaskName: build-container
+  - pipelineTaskName: build-images
     computeResources:
       requests:
         cpu: '8'
