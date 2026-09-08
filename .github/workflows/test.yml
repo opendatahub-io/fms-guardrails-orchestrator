@@ -2,9 +2,9 @@ name: Test and Lint Orchestrator
 
 on:
   push:
-    branches: [ "main", "incubation", "stable" ]
+    branches: [ "main", "stable" ]
   pull_request:
-    branches: [ "main", "incubation", "stable" ]
+    branches: [ "main", "stable" ]
     types: [opened, reopened, synchronize, ready_for_review]
 
 env:
